@@ -81,7 +81,8 @@
 
 #include "utils.h"
 
-__global__ void reduce_min_kernel(float* d_array, size_t length){
+template<typename funcT>
+__global__ void reduce_kernel(float* d_array, size_t length, funcT op){
     int steps=ceilf(log2f(length));
     unsigned int total_id = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int block_length = blockDim.x;
@@ -100,7 +101,7 @@ __global__ void reduce_min_kernel(float* d_array, size_t length){
         unsigned int step_size = (block_length+1)/2;
         if ((threadIdx.x + step_size) < block_length)
         {
-            shared_array[threadIdx.x] = fminf(shared_array[threadIdx.x], shared_array[threadIdx.x+step_size]);
+            shared_array[threadIdx.x] = op(shared_array[threadIdx.x], shared_array[threadIdx.x+step_size]);
         }
         block_length=step_size;
         __syncthreads();
@@ -109,8 +110,11 @@ __global__ void reduce_min_kernel(float* d_array, size_t length){
 }
 // __global__ void reduce_max(float* const d_array, float* max_value)
 // __global__ void fused_reduce_min_max(float* const d_array, float* min_value, float* max_value)
+__device__ float (*my_fminf)(float, float) = fminf;
+__device__ float (*my_fmaxf)(float, float) = fmaxf;
 
-float reduce_min(const float* const d_array, const size_t length){
+template<typename funcT>
+float reduce(const float* const d_array, const size_t length, funcT op){
     uint steps = ceilf(log2f(length));
     int numThreads = 1024;
     uint iters = ceilf(steps/10.);
@@ -127,11 +131,10 @@ float reduce_min(const float* const d_array, const size_t length){
         if (block_count==1)
             numThreads = current_length;
         // std::cout << "kernel size" << block_count<<","<<numThreads << std::endl;
-        reduce_min_kernel<<<block_count, numThreads>>>(d_result, current_length);
+        reduce_kernel<<<block_count, numThreads>>>(d_result, current_length, op);
         cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
         current_length = block_count;
     }
-    std::cout<<current_length<<","<<steps<<","<<iters<<","<<length<<std::endl;
     // float *h_result;
     // h_result=(float *)malloc(sizeof(float));
     float h_result;
@@ -160,8 +163,14 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
     const size_t length=numRows*numCols;
-    min_logLum = reduce_min(d_logLuminance, length);
+    float (*h_fminf)(float, float);
+    cudaMemcpyFromSymbol(&h_fminf, my_fminf, sizeof(void *)); // https://stackoverflow.com/questions/38133314/function-as-templated-parameter-in-cuda
+    float (*h_fmaxf)(float, float);
+    cudaMemcpyFromSymbol(&h_fmaxf, my_fmaxf, sizeof(void *));
+    min_logLum = reduce(d_logLuminance, length, h_fminf);
+    max_logLum = reduce(d_logLuminance, length, h_fmaxf);
     std::cout << "min_value:" << min_logLum<< std::endl;
+    std::cout << "max_value:" << max_logLum<< std::endl;
     // float result[length];
     // checkCudaErrors(cudaMemcpy(result, d_logLuminance, sizeof(float)*length, cudaMemcpyDeviceToHost));
     // printf("min_value %.5f\n", min_logLum);
