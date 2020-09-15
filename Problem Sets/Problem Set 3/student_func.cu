@@ -81,6 +81,8 @@
 
 #include "utils.h"
 
+const unsigned int NUMTHREAD = 1024;
+
 template<typename funcT>
 __global__ void reduce_kernel(float* d_array, size_t length, funcT op){
     int steps=ceilf(log2f(length));
@@ -91,7 +93,7 @@ __global__ void reduce_kernel(float* d_array, size_t length, funcT op){
         block_length = length % blockDim.x;
     }
     // copy data to shared memory
-    __shared__ float shared_array[1024];
+    __shared__ float shared_array[NUMTHREAD];
     if (threadIdx.x<block_length){
         shared_array[threadIdx.x] = d_array[total_id];
     }
@@ -116,7 +118,7 @@ __device__ float (*my_fmaxf)(float, float) = fmaxf;
 template<typename funcT>
 float reduce(const float* const d_array, const size_t length, funcT op){
     uint steps = ceilf(log2f(length));
-    int numThreads = 1024;
+    int numThreads = NUMTHREAD;
     uint iters = ceilf(steps/10.);
 
 
@@ -144,13 +146,32 @@ float reduce(const float* const d_array, const size_t length, funcT op){
 
 }
 
-void your_histogram_and_prefixsum(const float* const d_logLuminance,
-                                  unsigned int* const d_cdf,
-                                  float &min_logLum,
-                                  float &max_logLum,
-                                  const size_t numRows,
-                                  const size_t numCols,
-                                  const size_t numBins)
+__global__ void histogram_kernel(unsigned int* d_output, const float *const d_input, size_t length, const float min_value, const float interval)
+{
+    unsigned int id = blockIdx.x * blockDim.x + threadIdx.x;
+    float value = d_input[id];
+    if(id<length){
+        unsigned int bin_id = (value - min_value) / interval;
+        atomicAdd(d_output + bin_id, 1);
+    }
+}
+
+__global__ void print_int_kernel(const uint *const d_input, uint length){
+    unsigned int id = blockIdx.x * blockDim.x + threadIdx.x;
+    int value = d_input[id];
+    if (id < length)
+    {
+        printf("id[%d]=%d\n", id, value);
+    }
+}
+
+void your_histogram_and_prefixsum(const float *const d_logLuminance,
+                                 unsigned int *const d_cdf,
+                                 float &min_logLum,
+                                 float &max_logLum,
+                                 const size_t numRows,
+                                 const size_t numCols,
+                                 const size_t numBins)
 {
   //TODO
   /*Here are the steps you need to implement
@@ -171,6 +192,12 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     max_logLum = reduce(d_logLuminance, length, h_fmaxf);
     std::cout << "min_value:" << min_logLum<< std::endl;
     std::cout << "max_value:" << max_logLum<< std::endl;
+    float logLum_range = max_logLum - min_logLum;
+
+    float offset_per_bin = logLum_range / numBins;
+    // checkCudaErrors(cudaMemset())
+    histogram_kernel<<<(length + NUMTHREAD - 1) / NUMTHREAD, NUMTHREAD>>>(d_cdf, d_logLuminance, length, min_logLum, offset_per_bin);
+    // print_int_kernel<<<(length + NUMTHREAD - 1) / NUMTHREAD, NUMTHREAD>>>(d_cdf, numBins);
     // float result[length];
     // checkCudaErrors(cudaMemcpy(result, d_logLuminance, sizeof(float)*length, cudaMemcpyDeviceToHost));
     // printf("min_value %.5f\n", min_logLum);
