@@ -6,10 +6,10 @@
 ############################################################################
 
 cmake_minimum_required(VERSION 2.6 FATAL_ERROR)
-project(cs344)
+project(cs345 CXX CUDA)
 
 find_package(OpenCV REQUIRED)
-find_package(CUDA REQUIRED)
+# find_package(CUDA REQUIRED)
 
 link_libraries(${OpenCV_LIBS} )
 

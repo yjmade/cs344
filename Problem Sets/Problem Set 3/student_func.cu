@@ -6,7 +6,7 @@
 
   A High Dynamic Range (HDR) image contains a wider variation of intensity
   and color than is allowed by the RGB format with 1 byte per channel that we
-  have used in the previous assignment.  
+  have used in the previous assignment.
 
   To store this extra information we use single precision floating point for
   each channel.  This allows for an extremely wide range of intensity values.
@@ -53,7 +53,7 @@
   Old TV signals used to be transmitted in this way so that black & white
   televisions could display the luminance channel while color televisions would
   display all three of the channels.
-  
+
 
   Tone-mapping
   ============
@@ -81,6 +81,66 @@
 
 #include "utils.h"
 
+__global__ void reduce_min_kernel(float* d_array, size_t length){
+    int steps=ceilf(log2f(length));
+    unsigned int total_id = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int block_length = blockDim.x;
+    if (total_id/blockDim.x == blockIdx.x - 1){
+        // last block
+        block_length = length % blockDim.x;
+    }
+    // copy data to shared memory
+    __shared__ float shared_array[1024];
+    if (threadIdx.x<block_length){
+        shared_array[threadIdx.x] = d_array[total_id];
+    }
+    __syncthreads();
+
+    for (unsigned int step=0; step<steps; step++){
+        unsigned int step_size = (block_length+1)/2;
+        if ((threadIdx.x + step_size) < block_length)
+        {
+            shared_array[threadIdx.x] = fminf(shared_array[threadIdx.x], shared_array[threadIdx.x+step_size]);
+        }
+        block_length=step_size;
+        __syncthreads();
+    }
+    d_array[blockIdx.x]=shared_array[0];
+}
+// __global__ void reduce_max(float* const d_array, float* max_value)
+// __global__ void fused_reduce_min_max(float* const d_array, float* min_value, float* max_value)
+
+float reduce_min(const float* const d_array, const size_t length){
+    uint steps = ceilf(log2f(length));
+    int numThreads = 1024;
+    uint iters = ceilf(steps/10.);
+
+
+    float *d_result;
+    checkCudaErrors(cudaMalloc(&d_result, sizeof(float)*length));
+    checkCudaErrors(cudaMemcpy(d_result, d_array, sizeof(float) * length, cudaMemcpyDeviceToDevice));
+    size_t current_length = length;
+    for (int iter = 0; iter < iters; iter++)
+    {
+        // std::cout<<"current length"<< current_length<<std::endl;
+        size_t block_count = (current_length+numThreads-1)/numThreads;
+        if (block_count==1)
+            numThreads = current_length;
+        // std::cout << "kernel size" << block_count<<","<<numThreads << std::endl;
+        reduce_min_kernel<<<block_count, numThreads>>>(d_result, current_length);
+        cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+        current_length = block_count;
+    }
+    std::cout<<current_length<<","<<steps<<","<<iters<<","<<length<<std::endl;
+    // float *h_result;
+    // h_result=(float *)malloc(sizeof(float));
+    float h_result;
+    checkCudaErrors(cudaMemcpy(&h_result, d_result, sizeof(float) * 1, cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaFree(d_result));
+    return h_result;
+
+}
+
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -99,6 +159,16 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     4) Perform an exclusive scan (prefix sum) on the histogram to get
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
-
-
+    const size_t length=numRows*numCols;
+    min_logLum = reduce_min(d_logLuminance, length);
+    std::cout << "min_value:" << min_logLum<< std::endl;
+    // float result[length];
+    // checkCudaErrors(cudaMemcpy(result, d_logLuminance, sizeof(float)*length, cudaMemcpyDeviceToHost));
+    // printf("min_value %.5f\n", min_logLum);
+    // // max_logLum = reduce_max(d_logLuminance, length);
+    // for(int i=0; i < length; i++){
+    //     // std::cout<<*(d_logLuminance)<<",";
+    //     printf("%f, ", result[i]);
+    // }
+    // printf("\n");
 }
