@@ -83,8 +83,8 @@
 
 const unsigned int NUMTHREAD = 1024;
 
-template<typename funcT>
-__global__ void reduce_kernel(float* d_array, size_t length, funcT op){
+template<typename T,typename funcT>
+__global__ void reduce_kernel(T* d_array, size_t length, funcT op){
     int steps=ceilf(log2f(length));
     unsigned int total_id = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int block_length = blockDim.x;
@@ -93,7 +93,7 @@ __global__ void reduce_kernel(float* d_array, size_t length, funcT op){
         block_length = length % blockDim.x;
     }
     // copy data to shared memory
-    __shared__ float shared_array[NUMTHREAD];
+    __shared__ T shared_array[NUMTHREAD];
     if (threadIdx.x<block_length){
         shared_array[threadIdx.x] = d_array[total_id];
     }
@@ -115,16 +115,16 @@ __global__ void reduce_kernel(float* d_array, size_t length, funcT op){
 __device__ float (*my_fminf)(float, float) = fminf;
 __device__ float (*my_fmaxf)(float, float) = fmaxf;
 
-template<typename funcT>
-float reduce(const float* const d_array, const size_t length, funcT op){
+template<typename T, typename funcT>
+float reduce(const T* const d_array, const size_t length, funcT op){
     uint steps = ceilf(log2f(length));
     int numThreads = NUMTHREAD;
     uint iters = ceilf(steps/10.);
 
 
-    float *d_result;
-    checkCudaErrors(cudaMalloc(&d_result, sizeof(float)*length));
-    checkCudaErrors(cudaMemcpy(d_result, d_array, sizeof(float) * length, cudaMemcpyDeviceToDevice));
+    T *d_result;
+    checkCudaErrors(cudaMalloc(&d_result, sizeof(T)*length));
+    checkCudaErrors(cudaMemcpy(d_result, d_array, sizeof(T) * length, cudaMemcpyDeviceToDevice));
     size_t current_length = length;
     for (int iter = 0; iter < iters; iter++)
     {
@@ -137,24 +137,72 @@ float reduce(const float* const d_array, const size_t length, funcT op){
         cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
         current_length = block_count;
     }
-    // float *h_result;
-    // h_result=(float *)malloc(sizeof(float));
-    float h_result;
-    checkCudaErrors(cudaMemcpy(&h_result, d_result, sizeof(float) * 1, cudaMemcpyDeviceToHost));
+    // T *h_result;
+    // h_result=(T *)malloc(sizeof(T));
+    T h_result;
+    checkCudaErrors(cudaMemcpy(&h_result, d_result, sizeof(T) * 1, cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaFree(d_result));
     return h_result;
 
 }
 
-__global__ void histogram_kernel(unsigned int* d_output, const float *const d_input, size_t length, const float min_value, const float interval)
+__global__ void histogram_kernel(unsigned int* d_output, const float *const d_input, size_t length, const float min_value, const float interval, const uint bin_count)
 {
     unsigned int id = blockIdx.x * blockDim.x + threadIdx.x;
     float value = d_input[id];
     if(id<length){
         unsigned int bin_id = (value - min_value) / interval;
+        bin_id = min(bin_id, bin_count-1);
         atomicAdd(d_output + bin_id, 1);
     }
 }
+
+template<typename T>
+__global__ void scan(T *g_odata, T *g_idata, uint n) {
+    extern __shared__ T temp[]; // allocated on invocation
+    int thid = threadIdx.x;
+    // Load input into shared memory.
+    // This is exclusive scan, so shift right by one
+    // and set first element to 0
+    temp[thid] = (thid > 0) ? g_idata[thid-1] : 0;
+    __syncthreads();
+    for (int offset = 1; offset < n; offset *= 2)   {
+        if (thid >= offset){
+            T temp_value = temp[thid - offset];
+            __syncthreads();
+            temp[thid] += temp_value;
+
+        }
+        __syncthreads();
+    }
+    g_odata[thid] = temp[thid];
+    // write output
+}
+
+// template<typename T>
+// __global__ void scan(T *g_odata, T *g_idata, int n) {
+//     extern __shared__ T temp[]; // allocated on invocation
+//     int thid = threadIdx.x;
+//     int pout = 0, pin = 1;
+//     // Load input into shared memory.
+//     // This is exclusive scan, so shift right by one
+//     // and set first element to 0
+//     temp[pout*n + thid] = (thid > 0) ? g_idata[thid-1] : 0;
+//     __syncthreads();
+//     for (int offset = 1; offset < n; offset *= 2)   {
+//         pout = 1 - pout; // swap double buffer indices
+//         pin = 1 - pout;
+//         if (thid >= offset)
+//             temp[pout*n+thid] += temp[pin*n+thid - offset];
+//         else
+//             temp[pout*n+thid] = temp[pin*n+thid];
+//         __syncthreads();
+//     }
+//     g_odata[thid] = temp[pout*n+thid];
+//     // write output
+// }
+
+
 
 __global__ void print_int_kernel(const uint *const d_input, uint length){
     unsigned int id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -190,14 +238,14 @@ void your_histogram_and_prefixsum(const float *const d_logLuminance,
     cudaMemcpyFromSymbol(&h_fmaxf, my_fmaxf, sizeof(void *));
     min_logLum = reduce(d_logLuminance, length, h_fminf);
     max_logLum = reduce(d_logLuminance, length, h_fmaxf);
-    std::cout << "min_value:" << min_logLum<< std::endl;
-    std::cout << "max_value:" << max_logLum<< std::endl;
     float logLum_range = max_logLum - min_logLum;
 
     float offset_per_bin = logLum_range / numBins;
     // checkCudaErrors(cudaMemset())
-    histogram_kernel<<<(length + NUMTHREAD - 1) / NUMTHREAD, NUMTHREAD>>>(d_cdf, d_logLuminance, length, min_logLum, offset_per_bin);
-    // print_int_kernel<<<(length + NUMTHREAD - 1) / NUMTHREAD, NUMTHREAD>>>(d_cdf, numBins);
+    histogram_kernel<<<(length + NUMTHREAD - 1) / NUMTHREAD, NUMTHREAD>>>(d_cdf, d_logLuminance, length, min_logLum, offset_per_bin, numBins);
+    scan<<<1,numBins, sizeof(uint)*numBins>>>(d_cdf, d_cdf, numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    // print_int_kernel<<<(numBins + NUMTHREAD - 1) / NUMTHREAD, NUMTHREAD>>>(d_cdf, numBins);
     // float result[length];
     // checkCudaErrors(cudaMemcpy(result, d_logLuminance, sizeof(float)*length, cudaMemcpyDeviceToHost));
     // printf("min_value %.5f\n", min_logLum);
